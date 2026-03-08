@@ -1,0 +1,223 @@
+//Весрия с возможностью перемещаться в одной плоскости
+// управления наблюдателем (камерой) при помощи стрелок: Up, Down, Left, Right
+
+#define NOMINMAX
+#include <Windows.h>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <cstdint>
+#include <iostream>
+#include <chrono>
+#include <thread>
+
+/*
+    Программа рендерит 3D-поверхность "сердца" в буфер пикселей и выводит его
+    в клиентскую область консольного окна Windows. Добавлена возможность
+    перемещения наблюдателя (камеры) с помощью клавиш со стрелками.
+
+    Комментарии — на русском. Консольный вывод — на английском.
+*/
+
+/* -------------------- Векторная арифметика -------------------- */
+
+struct vec2 { float x, y; vec2() : x(0), y(0) {} vec2(float a, float b) : x(a), y(b) {} };
+vec2 operator*(vec2 const &lh, float rh) { return vec2(lh.x * rh, lh.y * rh); }
+vec2 operator-(vec2 const &lh, vec2 const &rh) { return vec2(lh.x - rh.x, lh.y - rh.y); }
+
+struct vec3 { float x, y, z; vec3() : x(0), y(0), z(0) {} vec3(float a, float b, float c) : x(a), y(b), z(c) {} };
+vec3 operator+(vec3 const &lh, vec3 const &rh) { return vec3(lh.x + rh.x, lh.y + rh.y, lh.z + rh.z); }
+vec3 operator*(vec3 const &lh, vec3 const &rh) { return vec3(lh.x * rh.x, lh.y * rh.y, lh.z * rh.z); }
+vec3 operator*(vec3 const &lh, float rh) { return vec3(lh.x * rh, lh.y * rh, lh.z * rh); }
+float dot(vec3 const &lh, vec3 const &rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
+vec3 normalize(vec3 const &v)
+{
+    float d = std::sqrt(dot(v, v));
+    if (d == 0.0f) return vec3(0.f, 1.f, 0.f);
+    return v * (1.0f / d);
+}
+
+/* -------------------- Модель сердца -------------------- */
+
+/* Скалярная функция поверхности сердца: f(p) <= 0 означает внутри/на поверхности */
+float f(vec3 p)
+{
+    vec3 pp = p * p;
+    vec3 ppp = pp * p;
+    float a = pp.x + 2.25f * pp.y + pp.z - 1.0f;
+    return a * a * a - (pp.x + 0.1125f * pp.y) * ppp.z;
+}
+
+/* Бисекция для нахождения y при фиксированных x,z (граница сердца) */
+float h(float x, float z)
+{
+    float a = 0.0f, b = 0.75f, y = 0.5f;
+    for (int i = 0; i < 10; i++)
+    {
+        if (f(vec3(x, y, z)) <= 0.0f) a = y; else b = y;
+        y = (a + b) * 0.5f;
+    }
+    return y;
+}
+
+/* Вычисление нормали поверхности в точке (x,?,z) */
+vec3 normal(vec2 p)
+{
+    vec3 v = vec3(p.x, h(p.x, p.y), p.y);
+    vec3 vv = v * v;
+    vec3 vvv = vv * v;
+    float a = -1.0f + dot(vv, vec3(1.f, 2.25f, 1.f));
+    a *= a;
+
+    return normalize(vec3(
+        -2.0f * v.x * vvv.z + 6.0f * v.x * a,
+        -0.225f * v.y * vvv.z + 13.5f * v.y * a,
+        v.z * (-3.0f * vv.x * v.z - 0.3375f * vv.y * v.z + 6.0f * a)));
+}
+
+/* -------------------- Шейдинг -------------------- */
+
+/*
+    shade(fragCoord, resolution, cam)
+    fragCoord: координаты пикселя (0..w-1, 0..h-1), 0 верхняя строка.
+    resolution: (w, h).
+    cam: смещение камеры в тех же нормализованных координатах, что и t.
+    Возвращает цвет vec3 в диапазоне [0,1].
+*/
+vec3 shade(vec2 fragCoord, vec2 resolution, vec2 cam)
+{
+    // Преобразование экранных координат в нормализованные [-?..?]
+    vec2 t = (fragCoord * 2.0f - resolution) * (1.f / std::min(resolution.y, resolution.x));
+    // Добавляем смещение камеры (панорамирование)
+    t = vec2(t.x + cam.x, t.y + cam.y);
+
+    vec3 p = vec3(t.x, t.y, 0.f);
+    vec3 tp = p * vec3(2.0f, 2.0f, 0.0f);
+
+    if (f(vec3(tp.x, tp.z, tp.y)) <= 0.0f)
+    {
+        vec3 n = normal(vec2(tp.x, tp.y));
+        float diffuse = dot(n, normalize(vec3(-1.f, 1.f, 1.f))) * 0.5f + 0.5f;
+        float specular = std::pow(std::max(dot(n, normalize(vec3(-1.f, 2.f, 1.f))), 0.0f), 64.f);
+        float rim = 1.0f - dot(n, vec3(0.f, 1.f, 0.f));
+        return vec3(1.f, 0.f, 0.f) * diffuse + vec3(0.8f, 0.8f, 0.8f) * specular + vec3(0.5f, 0.5f, 0.5f) * rim;
+    }
+    else
+        return vec3(1.f, 0.8f, 0.7f - 0.07f * p.y) * (1.f - 0.15f * std::sqrt(dot(p, p)));
+}
+
+/* -------------------- Утилиты -------------------- */
+
+float clampf(float v, float lo, float hi) { if (v < lo) return lo; if (v > hi) return hi; return v; }
+int my_lround(float f) { int i = static_cast<int>(f); return (f - i < 0.5f) ? i : (i + 1); }
+
+std::uint32_t toBGRA(vec3 color)
+{
+    const std::uint32_t r = 0xff & static_cast<std::uint32_t>(my_lround(clampf(color.x, 0.0f, 1.f) * 255.f));
+    const std::uint32_t g = 0xff & static_cast<std::uint32_t>(my_lround(clampf(color.y, 0.0f, 1.f) * 255.f));
+    const std::uint32_t b = 0xff & static_cast<std::uint32_t>(my_lround(clampf(color.z, 0.0f, 1.f) * 255.f));
+    return (0xFF000000u) | (r << 16) | (g << 8) | (b);
+}
+
+/* -------------------- main: вывод и обработка ввода -------------------- */
+
+int main()
+{
+    // Получаем окно консоли и проверяем
+    HWND win = ::GetConsoleWindow();
+    if (!win) { std::cerr << "GetConsoleWindow() returned NULL\n"; return 1; }
+
+    // Запрашиваем информацию о окне — обязательно задаём cbSize
+    WINDOWINFO wi = {};
+    wi.cbSize = sizeof(WINDOWINFO);
+    if (!::GetWindowInfo(win, &wi)) { std::cerr << "GetWindowInfo failed\n"; return 1; }
+
+    // Контекст устройства для вывода
+    HDC dc = ::GetDC(win);
+    if (!dc) { std::cerr << "GetDC failed\n"; return 1; }
+
+    // Размер клиентской области
+    int w = wi.rcClient.right - wi.rcClient.left;
+    int h = wi.rcClient.bottom - wi.rcClient.top;
+    if (w <= 0 || h <= 0) { std::cerr << "Invalid client size: " << w << "x" << h << "\n"; ::ReleaseDC(win, dc); return 1; }
+
+    // Буфер пикселей
+    std::vector<std::uint32_t> pixels;
+    try { pixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h)); }
+    catch (...) { std::cerr << "Failed to allocate pixel buffer\n"; ::ReleaseDC(win, dc); return 1; }
+
+    // Инструкция пользователю (англ.)
+    std::cout << "Use arrow keys to move the camera (Left/Right/Up/Down). Press Esc to exit.\n";
+    std::cout << "Press Enter to start...\n";
+    std::cin.get();
+
+    // Камера: смещение в координатах, совместимых с t (шаг по X/Y)
+    // Начальное значение 0 — центр.
+    vec2 cam(0.0f, 0.0f);
+
+    // Параметры управления: скорость перемещения камеры в "t"-координатах в единицах в секунду.
+    // Подбери скорость при необходимости.
+    const float baseSpeed = 1.0f; // скорость при зажатой клавише (прибл.)
+
+    // Подготовка структуры BITMAPINFO — используем top-down DIB (biHeight = -h)
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = h; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    // Цикл рендеринга и обработки ввода
+    using clock = std::chrono::steady_clock;
+    auto last = clock::now();
+    bool running = true;
+
+    while (running)
+    {
+        // Время между кадрами для независимости от FPS
+        auto now = clock::now();
+        float dt = std::chrono::duration<float>(now - last).count();
+        last = now;
+
+        // Обработка клавиш — GetAsyncKeyState возвращает старший бит, если клавиша нажата сейчас
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { running = false; break; }
+
+        // Движение камеры: стрелки перемещают камеру в соответствующую сторону.
+        // Заметь: положительное смещение cam.x сдвигает вид вправо (сдвиг сцены влево),
+        // положительное cam.y сдвигает вид вниз (пользователь смотрит чуть выше).
+        float speed = baseSpeed; // можно умножать на dt
+        if (GetAsyncKeyState(VK_LEFT) & 0x8000)  cam.x -= speed * dt;
+        if (GetAsyncKeyState(VK_RIGHT) & 0x8000) cam.x += speed * dt;
+        if (GetAsyncKeyState(VK_UP) & 0x8000)    cam.y -= speed * dt;
+        if (GetAsyncKeyState(VK_DOWN) & 0x8000)  cam.y += speed * dt;
+
+        // Генерация пикселей (полный рендер каждый кадр)
+        // При необходимости можно оптимизировать (только при изменении камеры, многопоток и т.д.)
+        for (int y = 0; y < h; ++y)
+        {
+            for (int x = 0; x < w; ++x)
+            {
+                vec2 frag(static_cast<float>(x), static_cast<float>(y));
+                vec2 res(static_cast<float>(w), static_cast<float>(h));
+                vec3 col = shade(frag, res, cam);
+                pixels[y * w + x] = toBGRA(col);
+            }
+        }
+
+        // Вывод в окно
+        ::StretchDIBits(dc,
+            0, 0, w, h,
+            0, 0, w, h,
+            pixels.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+
+        // Небольшая пауза, чтобы не загружать процессор полностью. Sleep минимален для плавности.
+        // Можно корректировать по желанию.
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+
+    // Освобождение DC и выход
+    ::ReleaseDC(win, dc);
+    std::cout << "Exiting...\n";
+    return 0;
+}
